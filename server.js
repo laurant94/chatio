@@ -1,42 +1,55 @@
 const express = require('express');
 const http = require('http');
-const { Server } = require('socket.io');
-const path = require('path'); // Ajoute cette ligne
+const path = require('path');
+const WebSocket = require('ws');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"]
-  }
-});
+const wss = new WebSocket.Server({ server }); // Remplace socket.io
 
-const PORT = process.env.PORT || 3000; // Utilise le port 3000 par défaut ou celui défini par l'environnement
+const PORT = process.env.PORT || 3000;
 
-// Route de base pour vérifier que le serveur HTTP fonctionne
+// Servez un fichier HTML pour tester dans un navigateur
 app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html')); // Va chercher le fichier dans le dossier public
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// Événements Socket.IO
-io.on('connection', (socket) => {
-  console.log(`Un utilisateur s'est connecté : ${socket.id}`);
+// Pour stocker tous les clients connectés
+const clients = new Set();
 
-  // Écoute l'événement 'chat message'
-  socket.on('chat message', (msg) => {
-    console.log(`Message reçu de ${socket.id}: ${msg}`);
-    // Diffuse le message à tous les clients connectés
-    io.emit('chat message', msg);
+wss.on('connection', (ws) => {
+  console.log('✅ Un client WebSocket est connecté');
+  clients.add(ws);
+
+  // Écoute les messages entrants
+  ws.on('message', (data) => {
+    try {
+      const parsed = JSON.parse(data);
+
+      if (parsed.event === 'chat message') {
+        console.log(`📨 Message reçu : ${parsed.data}`);
+
+        // Réémettre à tous les clients
+        for (const client of clients) {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(JSON.stringify({
+              event: 'chat message',
+              data: parsed.data
+            }));
+          }
+        }
+      }
+    } catch (e) {
+      console.error('Erreur de parsing JSON :', e);
+    }
   });
 
-  // Gère la déconnexion
-  socket.on('disconnect', () => {
-    console.log(`L'utilisateur ${socket.id} s'est déconnecté`);
+  ws.on('close', () => {
+    console.log('❌ Un client s’est déconnecté');
+    clients.delete(ws);
   });
 });
 
-// Démarre le serveur
 server.listen(PORT, () => {
-  console.log(`Serveur Socket.IO démarré sur le port :${PORT}`);
+  console.log(`🚀 Serveur WebSocket en écoute sur le port ${PORT}`);
 });
