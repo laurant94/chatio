@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test Chat WebSocket</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 1rem; }
+        ul { list-style: none; padding: 0; }
+        li { padding: 0.5rem; border-bottom: 1px solid #ddd; }
+    </style>
+</head>
+<body>
+    <h1>Chat de test (WebSocket)</h1>
+    <ul id="messages"></ul>
+    <form id="form" action="">
+        <input id="input" autocomplete="off" placeholder="Écris ton message..." />
+        <button>Envoyer</button>
+    </form>
+
+    <script>
+        // Remplace ws://localhost:3000 par l’adresse de ton serveur si besoin
+        const socket = new WebSocket("ws://localhost:3000");
+
+        const form = document.getElementById('form');
+        const input = document.getElementById('input');
+        const messages = document.getElementById('messages');
+
+        socket.addEventListener('open', () => {
+            console.log('✅ Connecté au serveur WebSocket');
+        });
+
+        socket.addEventListener('message', (event) => {
+            try {
+                const msg = JSON.parse(event.data);
+                if (msg.event === 'chat message') {
+                    const item = document.createElement('li');
+                    item.textContent = msg.data;
+                    messages.appendChild(item);
+                    window.scrollTo(0, document.body.scrollHeight);
+                }
+            } catch (e) {
+                console.error('Erreur lors de la lecture du message :', e);
+            }
+        });
+
+        socket.addEventListener('close', () => {
+            console.log('❌ Déconnecté du serveur WebSocket');
+        });
+
+        socket.addEventListener('error', (e) => {
+            console.error('Erreur WebSocket :', e);
+        });
+
+        form.addEventListener('submit', (e) => {
+            e.preventDefault();
+            if (input.value && socket.readyState === WebSocket.OPEN) {
+                const message = {
+                    event: 'chat message',
+                    data: input.value
+                };
+                socket.send(JSON.stringify(message));
+                input.value = '';
+            }
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,175 @@
+// websocket/message.js
+const fetch = require('node-fetch');
+
+// Map pour stocker les utilisateurs connectés par conversationId
+// Clé: conversationId (int), Valeur: Set<WebSocket> (ensemble de sockets dans cette conversation)
+const conversationsClients = new Map();
+
+// Nouvelle map pour les clients sur la page des conversations (lobby/liste principale)
+// Clé: userId (pourrait être utile si on veut cibler un utilisateur spécifique), Valeur: WebSocket
+// Un Set est plus simple si on ne gère pas de ciblage par user_id au niveau du lobby.
+// Pour cet usage, un Set de WebSockets est suffisant pour "tous les clients du lobby".
+const lobbyClients = new Set();
+
+
+/**
+ * Gère l'événement 'joinConversation'.
+ * Ajoute le client à la map des conversations et le retire des précédentes.
+ * @param {WebSocket} ws La connexion WebSocket du client.
+ * @param {any} conversationId L'ID de la conversation à rejoindre.
+ * @param {string} clientIp L'adresse IP du client.
+ */
+function handleJoinConversation(ws, conversationId, clientIp) {
+    if (typeof conversationId === 'number' || typeof conversationId === 'string') {
+        // Retire le client de toutes les conversations précédentes (pour éviter les doublons)
+        conversationsClients.forEach((clientsSet, convId) => {
+            if (clientsSet.has(ws)) {
+                clientsSet.delete(ws);
+                console.log(`Client ${clientIp} a quitté la conversation ${convId}`);
+            }
+        });
+
+        // Si un client rejoint une conversation spécifique, il quitte le "lobby"
+        if (lobbyClients.has(ws)) {
+            lobbyClients.delete(ws);
+            console.log(`Client ${clientIp} a quitté le lobby pour rejoindre la conversation ${conversationId}`);
+        }
+
+        if (!conversationsClients.has(conversationId)) {
+            conversationsClients.set(conversationId, new Set());
+        }
+        conversationsClients.get(conversationId).add(ws);
+        console.log(`Client ${clientIp} a rejoint la conversation ${conversationId}. Total dans cette conv: ${conversationsClients.get(conversationId).size}`);
+
+        ws.send(JSON.stringify({ event: 'joinedConversation', data: conversationId }));
+    } else {
+        console.warn(`ID de conversation invalide reçu pour joinConversation de ${clientIp}:`, conversationId);
+        ws.send(JSON.stringify({ event: 'joinConversationError', message: 'ID de conversation invalide.' }));
+    }
+}
+
+/**
+ * Gère l'événement 'sendMessage'.
+ * Sauvegarde le message via l'API Laravel et le diffuse aux autres clients de la conversation.
+ * Émet également une mise à jour pour les clients sur la page des conversations.
+ * @param {WebSocket} ws La connexion WebSocket du client qui envoie le message.
+ * @param {Object} messageData Les données du message (token, conversationId, senderId, content, type).
+ * @param {string} apiBaseUrl L'URL de base de l'API Laravel.
+ */
+async function handleSendMessage(ws, messageData, apiBaseUrl) {
+    const { token, conversationId, senderId, content, type } = messageData;
+
+    if (!conversationId || !senderId || !content || !token) {
+        console.warn('Données de message manquantes ou incomplètes:', messageData);
+        ws.send(JSON.stringify({ event: 'sendMessageError', message: 'Données de message manquantes (conversationId, senderId, content, ou token).' }));
+        return;
+    }
+
+    console.log(`Message reçu pour la conversation ${conversationId} de l'utilisateur ${senderId}: ${content}`);
+
+    try {
+        const laravelApiEndpoint = `${apiBaseUrl}/messages`;
+
+        const response = await fetch(laravelApiEndpoint, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`,
+                'User-Agent': "Socket-Chat-Dispatch V1"
+            },
+            body: JSON.stringify({
+                conversation_id: conversationId,
+                user_id: senderId,
+                content: content,
+                type: type || 'text',
+            }),
+        });
+
+        const apiResponse = await response.json();
+
+        if (!response.ok) {
+            console.error('Erreur de sauvegarde Laravel:', apiResponse.message || apiResponse.errors);
+            throw new Error(apiResponse.message || (apiResponse.errors ? JSON.stringify(apiResponse.errors) : 'Erreur inconnue de Laravel'));
+        }
+
+        const savedMessage = apiResponse.data; // Le message sauvegardé par Laravel
+
+        // 1. Émettre le message à tous les clients dans la même conversation (chat actifs)
+        const clientsInConversation = conversationsClients.get(conversationId);
+        if (clientsInConversation) {
+            clientsInConversation.forEach(client => {
+                if (client.readyState === WebSocket.OPEN) {
+                    client.send(JSON.stringify({ event: 'newMessage', data: savedMessage }));
+                }
+            });
+            console.log(`Message émis à ${clientsInConversation.size} clients dans la conversation ${conversationId}`);
+        }
+
+        // 2. Émettre une notification de mise à jour aux clients sur la page des conversations (lobby)
+        lobbyClients.forEach(client => {
+            if (client.readyState === WebSocket.OPEN) {
+                // Envoyer un signal général pour dire "une conversation a été mise à jour".
+                // Le client devra ensuite faire un appel REST pour récupérer les données à jour.
+                client.send(JSON.stringify({
+                    event: 'conversationListUpdated',
+                    data: { conversationId: conversationId } // Peut inclure l'ID pour info, mais le client rechargera toute la liste
+                }));
+            }
+        });
+        console.log(`Notification 'conversationListUpdated' émise à ${lobbyClients.size} clients du lobby.`);
+
+    } catch (error) {
+        console.error("Erreur lors de la sauvegarde/émission du message :", error.message);
+        ws.send(JSON.stringify({ event: 'sendMessageError', message: 'Échec de l\'envoi du message: ' + error.message }));
+    }
+}
+
+/**
+ * Gère l'ajout d'un client au "lobby" (page de conversations).
+ * Quand un client se connecte à l'application et n'est pas dans une conversation spécifique.
+ * @param {WebSocket} ws La connexion WebSocket du client.
+ * @param {string} clientIp L'adresse IP du client (pour le logging).
+ */
+function handleJoinLobby(ws, clientIp) {
+    // Retirer le client de toutes les conversations spécifiques s'il était dedans
+    conversationsClients.forEach((clientsSet, convId) => {
+        if (clientsSet.has(ws)) {
+            clientsSet.delete(ws);
+            console.log(`Client ${clientIp} a quitté la conversation ${convId} pour le lobby.`);
+        }
+    });
+
+    if (!lobbyClients.has(ws)) {
+        lobbyClients.add(ws);
+        console.log(`Client ${clientIp} a rejoint le lobby. Total: ${lobbyClients.size}`);
+    }
+    ws.send(JSON.stringify({ event: 'joinedLobby', message: 'Vous êtes maintenant abonné aux mises à jour des conversations.' }));
+}
+
+/**
+ * Retire un client de toutes les conversations et du lobby lors de sa déconnexion.
+ * @param {WebSocket} ws La connexion WebSocket du client.
+ * @param {string} clientIp L'adresse IP du client (pour le logging).
+ */
+function removeClientFromAllConversationsAndLobby(ws, clientIp) {
+    conversationsClients.forEach((clientsSet, convId) => {
+        if (clientsSet.has(ws)) {
+            clientsSet.delete(ws);
+            console.log(`Client ${clientIp} supprimé de la conversation ${convId}.`);
+            if (clientsSet.size === 0) {
+                conversationsClients.delete(convId);
+            }
+        }
+    });
+    if (lobbyClients.has(ws)) {
+        lobbyClients.delete(ws);
+        console.log(`Client ${clientIp} supprimé du lobby. Restant: ${lobbyClients.size}`);
+    }
+}
+
+module.exports = {
+    handleJoinConversation,
+    handleSendMessage,
+    handleJoinLobby,
+    removeClientFromAllConversations: removeClientFromAllConversationsAndLobby,
+};

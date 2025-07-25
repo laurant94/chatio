@@ -1,0 +1,175 @@
+const WebSocket = require('ws');
+const http = require('http'); // Pour créer un serveur HTTP qui écoutera les requêtes de mise à niveau WebSocket
+const url = require('url');   // Pour parser les URLs des requêtes WebSocket
+
+const PORT = process.env.PORT || 3000;
+
+// Créer un serveur HTTP (nécessaire pour la mise à niveau du protocole vers WebSocket)
+const server = http.createServer((req, res) => {
+  // Optionnel: Gérer les requêtes HTTP standard si tu en as
+  if (req.url === '/') {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Serveur WebSocket en marche (basé sur ws) !');
+  } else {
+    res.writeHead(404);
+    res.end('Not Found');
+  }
+});
+
+// Créer un serveur WebSocket en utilisant le serveur HTTP existant
+const wss = new WebSocket.Server({ server });
+
+// Map pour stocker les utilisateurs connectés par conversationId
+// Clé: conversationId (int), Valeur: Set<WebSocket> (ensemble de sockets dans cette conversation)
+const conversationsClients = new Map();
+
+// --- Logique WebSocket ---
+wss.on('connection', (ws, req) => {
+  // Chaque `ws` est une connexion client individuelle
+  console.log(`Un client WebSocket s'est connecté.`);
+
+  // Pourrait être utilisé pour l'authentification ou pour passer un userId initial
+  // const parameters = url.parse(req.url, true);
+  // console.log('Paramètres de l\'URL:', parameters.query);
+
+  ws.on('message', async (message) => {
+    // Les messages sont des Buffer par défaut, convertis-les en string puis parse en JSON
+    const messageString = message.toString();
+    console.log(`Message reçu du client: ${messageString}`);
+
+    try {
+      const parsedMessage = JSON.parse(messageString);
+
+      // Gérer l'événement de "join" (rejoindre une conversation)
+      if (parsedMessage.event === 'joinConversation') {
+        const conversationId = parsedMessage.data; // Supposons que 'data' est l'ID de la conversation
+        if (typeof conversationId === 'number' || typeof conversationId === 'string') {
+          // Retire le client de toutes les conversations précédentes (pour éviter les doublons)
+          // et s'assurer qu'un client n'écoute qu'une conversation à la fois
+          conversationsClients.forEach((clientsSet, convId) => {
+            if (clientsSet.has(ws)) {
+              clientsSet.delete(ws);
+              console.log(`Client ${ws._socket.remoteAddress} a quitté la conversation ${convId}`);
+            }
+          });
+
+          if (!conversationsClients.has(conversationId)) {
+            conversationsClients.set(conversationId, new Set());
+          }
+          conversationsClients.get(conversationId).add(ws);
+          console.log(`Client ${ws._socket.remoteAddress} a rejoint la conversation ${conversationId}. Total dans cette conv: ${conversationsClients.get(conversationId).size}`);
+
+          // Tu peux envoyer une confirmation au client si tu le souhaites
+          ws.send(JSON.stringify({ event: 'joinedConversation', data: conversationId }));
+        } else {
+          console.warn('ID de conversation invalide reçu pour joinConversation:', conversationId);
+        }
+      }
+      // Gérer l'événement 'sendMessage'
+      else if (parsedMessage.event === 'sendMessage') {
+        const messageData = parsedMessage.data; // Contient conversationId, senderId, content, etc.
+        const { token, conversationId, senderId, content, type } = messageData;
+
+        if (!conversationId || !senderId || !content) {
+          console.warn('Données de message invalides:', messageData);
+          ws.send(JSON.stringify({ event: 'sendMessageError', message: 'Données de message manquantes.' }));
+          return;
+        }
+
+        console.log(`Message reçu pour la conversation ${conversationId} de l'utilisateur ${senderId}: ${content}`);
+
+        try {
+          // 1. Sauvegarder le message en base de données via ton API Laravel
+          // C'est la partie cruciale où tu devras faire une requête HTTP POST à ton backend Laravel.
+          // Tu devras probablement utiliser une bibliothèque HTTP comme 'node-fetch' ou 'axios'
+          // et inclure des headers d'authentification si ton API Laravel en a besoin.
+
+          // Exemple avec `node-fetch` (installe-le: `npm install node-fetch@2`)
+          // const fetch = require('node-fetch'); // Pour Node.js < 18, sinon fetch est global
+
+          // REMPLACEZ 'http://ton-api-laravel.com/api/messages' par l'URL réelle de votre API
+          const laravelApiEndpoint = 'https://kiakia.maracio.bj/api/messages'; // Exemple: ajuste le port si différent
+          // Assurez-vous que l'URL est accessible depuis votre serveur Node.js
+
+          const response = await fetch(laravelApiEndpoint, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${token}`,
+              'User-Agent': "Socket-Chat-Dirpatch V1"
+            },
+            body: JSON.stringify({
+              conversation_id: conversationId,
+              user_id: senderId,
+              content: content,
+              type: type || 'text',
+              // ... autres champs nécessaires à ta DB Laravel
+            }),
+          });
+
+          const apiResponse = await response.json();
+
+          if (!response.ok) {
+            console.error('Erreur de sauvegarde Laravel:', apiResponse.message || apiResponse.errors);
+            throw new Error(apiResponse.message || (apiResponse.errors ? JSON.stringify(apiResponse.errors) : 'Erreur inconnue de Laravel'));
+          }
+
+          // Le message sauvegardé avec son ID réel et createdAt de la DB
+          const savedMessage = apiResponse.data; // Assure-toi que Laravel renvoie la structure Message complète
+
+          // 2. Émettre le message à tous les clients dans la même conversation
+          const clientsInConversation = conversationsClients.get(conversationId);
+          if (clientsInConversation) {
+            clientsInConversation.forEach(client => {
+              if (client.readyState === WebSocket.OPEN) {
+                // 'newMessage' est l'événement que ton client Flutter écoutera
+                client.send(JSON.stringify({ event: 'newMessage', data: savedMessage }));
+              }
+            });
+            console.log(`Message émis à ${clientsInConversation.size} clients dans la conversation ${conversationId}`);
+          } else {
+            console.warn(`Aucun client connecté à la conversation ${conversationId} pour l'émission.`);
+          }
+
+        } catch (error) {
+          console.error("Erreur lors de la sauvegarde/émission du message :", error.message);
+          ws.send(JSON.stringify({ event: 'sendMessageError', message: 'Échec de l\'envoi du message: ' + error.message }));
+        }
+      }
+      // Gérer d'autres types d'événements si nécessaire
+      else {
+        console.log('Type d\'événement non reconnu:', parsedMessage.event);
+      }
+
+    } catch (e) {
+      console.error('Erreur lors du parsing du message JSON:', e);
+      ws.send(JSON.stringify({ event: 'error', message: 'Format de message invalide.' }));
+    }
+  });
+
+  // Gérer la déconnexion du client
+  ws.on('close', () => {
+    console.log(`Un client WebSocket s'est déconnecté.`);
+    // Supprimer le client de toutes les conversations où il se trouvait
+    conversationsClients.forEach((clientsSet, convId) => {
+      if (clientsSet.has(ws)) {
+        clientsSet.delete(ws);
+        console.log(`Client supprimé de la conversation ${convId}. Restant: ${clientsSet.size}`);
+        // Optionnel: supprimer la conversation de la map si elle devient vide
+        if (clientsSet.size === 0) {
+          conversationsClients.delete(convId);
+        }
+      }
+    });
+  });
+
+  // Gérer les erreurs de la connexion WebSocket
+  ws.on('error', (error) => {
+    console.error(`Erreur WebSocket: ${error.message}`);
+  });
+});
+
+// Démarrer le serveur HTTP qui écoute aussi les connexions WebSocket
+server.listen(PORT, () => {
+  console.log(`Serveur WebSocket écoutant sur le port ${PORT}`);
+});

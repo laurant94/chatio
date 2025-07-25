@@ -1,0 +1,180 @@
+// server.js
+require('dotenv').config(); // Charge les variables d'environnement depuis .env
+const express = require('express');
+const http = require('https');
+const path = require('path');
+const fs = require('fs');
+const WebSocket = require('ws');
+const fetch = require('node-fetch'); // Pour faire des requêtes HTTP à ton API Laravel
+
+const app = express();
+const options = {
+  key: fs.readFileSync('D:/laragon/etc/ssl/laragon.key'),
+  cert: fs.readFileSync('D:/laragon/etc/ssl/laragon.crt'),
+};
+
+const server = http.createServer(options ,app); // Crée un serveur HTTP pour Express et WS
+const wss = new WebSocket.Server({ server }); // Le serveur WebSocket s'accroche au même serveur HTTP
+
+const PORT = process.env.PORT || 3000; // Port du serveur Express et WebSocket
+const API_BASE_URL = process.env.API_BASE_URL; // URL de ton API Laravel
+const WEBSOCKET_URL = process.env.WEBSOCKET_URL; // URL de ton WebSocket (pour le client)
+
+// Middleware pour servir les fichiers statiques depuis le dossier 'public'
+app.use(express.static(path.join(__dirname, 'public')));
+// Middleware pour parser le JSON dans les requêtes (si tu en as besoin, pas directement pour cet exemple)
+app.use(express.json());
+
+// Map pour stocker les clients WebSocket par conversationId (comme dans l'exemple précédent)
+const conversationsClients = new Map();
+
+// --- Routes HTTP (Express) ---
+
+// Route principale '/'
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// Route '/chat'
+app.get('/chat', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'chat.html'));
+});
+
+// Route pour obtenir les variables d'environnement côté client (API_BASE_URL, WEBSOCKET_URL)
+// C'est une bonne pratique pour ne pas hardcoder ces URLs dans ton JS client
+app.get('/config', (req, res) => {
+    res.json({
+        API_BASE_URL: API_BASE_URL,
+        WEBSOCKET_URL: WEBSOCKET_URL
+    });
+});
+
+
+// --- Logique WebSocket ---
+wss.on('connection', (ws, req) => {
+    console.log(`Un client WebSocket s'est connecté.`);
+
+    ws.on('message', async (message) => {
+        const messageString = message.toString();
+        console.log(`Message reçu du client WS: ${messageString}`);
+
+        try {
+            const parsedMessage = JSON.parse(messageString);
+
+            // Gérer l'événement de "join" (rejoindre une conversation)
+            if (parsedMessage.event === 'joinConversation') {
+                const conversationId = parsedMessage.data;
+                if (typeof conversationId === 'number' || typeof conversationId === 'string') {
+                    // Retirer le client de toutes les conversations précédentes
+                    conversationsClients.forEach((clientsSet, convId) => {
+                        if (clientsSet.has(ws)) {
+                            clientsSet.delete(ws);
+                            console.log(`Client ${req.socket.remoteAddress} a quitté la conversation ${convId}`);
+                        }
+                    });
+
+                    if (!conversationsClients.has(conversationId)) {
+                        conversationsClients.set(conversationId, new Set());
+                    }
+                    conversationsClients.get(conversationId).add(ws);
+                    console.log(`Client ${req.socket.remoteAddress} a rejoint la conversation ${conversationId}. Total: ${conversationsClients.get(conversationId).size}`);
+
+                    ws.send(JSON.stringify({ event: 'joinedConversation', data: conversationId }));
+                } else {
+                    console.warn('ID de conversation invalide reçu pour joinConversation:', conversationId);
+                }
+            }
+            // Gérer l'événement 'sendMessage'
+            else if (parsedMessage.event === 'sendMessage') {
+                const messageData = parsedMessage.data;
+                const { conversationId, senderId, content, type, token } = messageData; // Récupère aussi le token
+
+                if (!conversationId || !senderId || !content) {
+                    console.warn('Données de message invalides:', messageData);
+                    ws.send(JSON.stringify({ event: 'sendMessageError', message: 'Données de message manquantes.' }));
+                    return;
+                }
+
+                console.log(`Message reçu pour la conversation ${conversationId} de l'utilisateur ${senderId}: ${content}`);
+
+                try {
+                    // Requête POST à l'API Laravel pour sauvegarder le message
+                    const laravelApiEndpoint = `${API_BASE_URL}/messages`;
+                    const headers = { 'Content-Type': 'application/json' };
+                    if (token) {
+                        headers['Authorization'] = `Bearer ${token}`; // Ajoute le token si fourni
+                    }
+
+                    const response = await fetch(laravelApiEndpoint, {
+                        method: 'POST',
+                        headers: headers,
+                        body: JSON.stringify({
+                            conversation_id: conversationId,
+                            user_id: senderId,
+                            content: content,
+                            type: type || 'text',
+                        }),
+                    });
+
+                    const apiResponse = await response.json();
+
+                    if (!response.ok) {
+                        console.error('Erreur de sauvegarde Laravel:', apiResponse.message || apiResponse.errors);
+                        throw new Error(apiResponse.message || (apiResponse.errors ? JSON.stringify(apiResponse.errors) : 'Erreur inconnue de Laravel'));
+                    }
+
+                    const savedMessage = apiResponse.data; // Le message sauvegardé par Laravel
+
+                    // Émettre le message à tous les clients dans la même conversation
+                    const clientsInConversation = conversationsClients.get(conversationId);
+                    if (clientsInConversation) {
+                        clientsInConversation.forEach(client => {
+                            if (client.readyState === WebSocket.OPEN) {
+                                client.send(JSON.stringify({ event: 'newMessage', data: savedMessage }));
+                            }
+                        });
+                        console.log(`Message émis à ${clientsInConversation.size} clients dans la conversation ${conversationId}`);
+                    } else {
+                        console.warn(`Aucun client connecté à la conversation ${conversationId} pour l'émission.`);
+                    }
+
+                } catch (error) {
+                    console.error("Erreur lors de la sauvegarde/émission du message :", error.message);
+                    ws.send(JSON.stringify({ event: 'sendMessageError', message: 'Échec de l\'envoi du message: ' + error.message }));
+                }
+            }
+            else {
+                console.log('Type d\'événement non reconnu:', parsedMessage.event);
+            }
+
+        } catch (e) {
+            console.error('Erreur lors du parsing du message JSON:', e);
+            ws.send(JSON.stringify({ event: 'error', message: 'Format de message invalide.' }));
+        }
+    });
+
+    ws.on('close', () => {
+        console.log(`Un client WebSocket s'est déconnecté.`);
+        conversationsClients.forEach((clientsSet, convId) => {
+            if (clientsSet.has(ws)) {
+                clientsSet.delete(ws);
+                console.log(`Client supprimé de la conversation ${convId}. Restant: ${clientsSet.size}`);
+                if (clientsSet.size === 0) {
+                    conversationsClients.delete(convId);
+                }
+            }
+        });
+    });
+
+    ws.on('error', (error) => {
+        console.error(`Erreur WebSocket: ${error.message}`);
+    });
+});
+
+
+// Démarrer le serveur HTTP et WebSocket
+server.listen(PORT, () => {
+    console.log(`Serveur Express et WebSocket écoutant sur http://localhost:${PORT}`);
+    console.log(`API_BASE_URL: ${API_BASE_URL}`);
+    console.log(`WEBSOCKET_URL: ${WEBSOCKET_URL}`);
+});

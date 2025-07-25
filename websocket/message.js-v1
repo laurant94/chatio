@@ -1,0 +1,129 @@
+// websocket/message.js
+// const fetch = require('node-fetch'); // Pour les requêtes HTTP vers l'API Laravel
+
+// Map pour stocker les utilisateurs connectés par conversationId
+// Clé: conversationId (int), Valeur: Set<WebSocket> (ensemble de sockets dans cette conversation)
+const conversationsClients = new Map();
+
+/**
+ * Gère l'événement 'joinConversation'.
+ * Ajoute le client à la map des conversations et le retire des précédentes.
+ * @param {WebSocket} ws La connexion WebSocket du client.
+ * @param {any} conversationId L'ID de la conversation à rejoindre.
+ */
+function handleJoinConversation(ws, conversationId, clientIp) {
+    if (typeof conversationId === 'number' || typeof conversationId === 'string') {
+        // Retire le client de toutes les conversations précédentes pour éviter les doublons
+        conversationsClients.forEach((clientsSet, convId) => {
+            if (clientsSet.has(ws)) {
+                clientsSet.delete(ws);
+                console.log(`Client ${clientIp} a quitté la conversation ${convId}`);
+            }
+        });
+
+        if (!conversationsClients.has(conversationId)) {
+            conversationsClients.set(conversationId, new Set());
+        }
+        conversationsClients.get(conversationId).add(ws);
+        console.log(`Client ${clientIp} a rejoint la conversation ${conversationId}. Total dans cette conv: ${conversationsClients.get(conversationId).size}`);
+
+        // Envoie une confirmation au client
+        ws.send(JSON.stringify({ event: 'joinedConversation', data: conversationId }));
+    } else {
+        console.warn(`ID de conversation invalide reçu pour joinConversation de ${clientIp}:`, conversationId);
+        ws.send(JSON.stringify({ event: 'joinConversationError', message: 'ID de conversation invalide.' }));
+    }
+}
+
+/**
+ * Gère l'événement 'sendMessage'.
+ * Sauvegarde le message via l'API Laravel et le diffuse aux autres clients de la conversation.
+ * @param {WebSocket} ws La connexion WebSocket du client qui envoie le message.
+ * @param {Object} messageData Les données du message (token, conversationId, senderId, content, type).
+ * @param {string} apiBaseUrl L'URL de base de l'API Laravel.
+ */
+async function handleSendMessage(ws, messageData, apiBaseUrl) {
+    const { token, conversationId, senderId, content, type } = messageData;
+
+    if (!conversationId || !senderId || !content || !token) {
+        console.warn('Données de message manquantes ou incomplètes:', messageData);
+        ws.send(JSON.stringify({ event: 'sendMessageError', message: 'Données de message manquantes (conversationId, senderId, content, ou token).' }));
+        return;
+    }
+
+    console.log(`Message reçu pour la conversation ${conversationId} de l'utilisateur ${senderId}: ${content}`);
+
+    try {
+        const laravelApiEndpoint = `${apiBaseUrl}/messages`;
+
+        const response = await fetch(laravelApiEndpoint, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`,
+                'User-Agent': "Socket-Chat-Dispatch V1"
+            },
+            body: JSON.stringify({
+                conversation_id: conversationId,
+                user_id: senderId,
+                content: content,
+                type: type || 'text',
+            }),
+        });
+
+        const apiResponse = await response.json();
+
+        if (!response.ok) {
+            console.error('Erreur de sauvegarde Laravel:', apiResponse.message || apiResponse.errors);
+            throw new Error(apiResponse.message || (apiResponse.errors ? JSON.stringify(apiResponse.errors) : 'Erreur inconnue de Laravel'));
+        }
+
+        const savedMessage = apiResponse.data; // Le message sauvegardé par Laravel
+
+        // Émettre le message à tous les clients dans la même conversation
+        const clientsInConversation = conversationsClients.get(conversationId);
+        if (clientsInConversation) {
+            clientsInConversation.forEach(client => {
+                if (client.readyState === WebSocket.OPEN) {
+                    client.send(JSON.stringify({ event: 'newMessage', data: savedMessage }));
+                }
+            });
+            console.log(`Message émis à ${clientsInConversation.size} clients dans la conversation ${conversationId}`);
+        } else {
+            console.warn(`Aucun client connecté à la conversation ${conversationId} pour l'émission.`);
+        }
+
+    } catch (error) {
+        console.error("Erreur lors de la sauvegarde/émission du message :", error.message);
+        ws.send(JSON.stringify({ event: 'sendMessageError', message: 'Échec de l\'envoi du message: ' + error.message }));
+    }
+}
+
+/**
+ * Retire un client de toutes les conversations lors de sa déconnexion.
+ * @param {WebSocket} ws La connexion WebSocket du client.
+ * @param {string} clientIp L'adresse IP du client (pour le logging).
+ */
+function removeClientFromAllConversations(ws, clientIp) {
+    conversationsClients.forEach((clientsSet, convId) => {
+        if (clientsSet.has(ws)) {
+            clientsSet.delete(ws);
+            console.log(`Client ${clientIp} supprimé de la conversation ${convId}. Restant: ${clientsSet.size}`);
+            if (clientsSet.size === 0) {
+                conversationsClients.delete(convId);
+            }
+        }
+    });
+}
+
+// Exporte les fonctions et la map pour qu'elles puissent être utilisées par d'autres fichiers
+module.exports = {
+    handleJoinConversation,
+    handleSendMessage,
+    removeClientFromAllConversations,
+    // La map peut être exportée si d'autres modules ont besoin de la manipuler directement,
+    // mais pour cette structure, elle est principalement utilisée en interne par ces fonctions.
+    // Cependant, si d'autres parties du code (futur) doivent itérer ou accéder à cette map,
+    // il serait pertinent de l'exporter. Pour l'instant, je la garde implicite à l'intérieur
+    // du module pour ces fonctions.
+};

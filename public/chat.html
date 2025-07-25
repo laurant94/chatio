@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chat</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; display: flex; flex-direction: column; height: 100vh; background-color: #f4f4f4; }
+        .chat-header { background-color: #007bff; color: white; padding: 15px; text-align: center; font-size: 1.2em; }
+        #messages { flex-grow: 1; padding: 10px; overflow-y: scroll; border-bottom: 1px solid #eee; background-color: #fff; }
+        .message-item { margin-bottom: 10px; display: flex; }
+        .message-item.sent { justify-content: flex-end; }
+        .message-item.received { justify-content: flex-start; }
+        .message-content {
+            padding: 8px 12px;
+            border-radius: 18px;
+            max-width: 70%;
+            word-wrap: break-word;
+        }
+        .message-item.sent .message-content { background-color: #dcf8c6; color: #333; }
+        .message-item.received .message-content { background-color: #e0e0e0; color: #333; }
+        .message-sender { font-size: 0.8em; color: #666; margin-bottom: 2px; }
+        .chat-input { display: flex; padding: 10px; background-color: #fff; border-top: 1px solid #eee; }
+        .chat-input input { flex-grow: 1; padding: 10px; border: 1px solid #ccc; border-radius: 20px; margin-right: 10px; }
+        .chat-input button { background-color: #007bff; color: white; padding: 10px 15px; border: none; border-radius: 20px; cursor: pointer; }
+        .chat-input button:hover { background-color: #0056b3; }
+        #status-indicator {
+            font-size: 0.9em;
+            text-align: center;
+            padding: 5px;
+            background-color: #ffc107;
+            color: #333;
+            display: none; /* Hidden by default */
+        }
+    </style>
+</head>
+<body>
+    <div class="chat-header">
+        Conversation: <span id="conversationTitle">Chargement...</span>
+        <div id="status-indicator">Déconnecté</div>
+    </div>
+    <div id="messages">
+        </div>
+    <div class="chat-input">
+        <input type="text" id="messageInput" placeholder="Écrivez un message...">
+        <button id="sendMessageButton">Envoyer</button>
+    </div>
+
+    <script>
+        let WEBSOCKET_URL; // Sera défini par /config
+        let API_BASE_URL; // Sera défini par /config (pas directement utilisé ici mais utile pour l'info)
+
+        const messagesDiv = document.getElementById('messages');
+        const messageInput = document.getElementById('messageInput');
+        const sendMessageButton = document.getElementById('sendMessageButton');
+        const conversationTitle = document.getElementById('conversationTitle');
+        const statusIndicator = document.getElementById('status-indicator');
+
+        let ws; // La connexion WebSocket
+        let currentConversationId;
+        let currentUserId;
+        let token; // Le token de l'utilisateur
+        let currentUserName = 'Moi'; // Nom par défaut, sera mis à jour après la reconnexion avec l'utilisateur
+        let userMap = new Map(); // Pour stocker les noms des utilisateurs par ID
+
+        // Récupérer les paramètres de l'URL
+        const urlParams = new URLSearchParams(window.location.search);
+        currentConversationId = urlParams.get('conversationId');
+        currentUserId = parseInt(urlParams.get('userId')); // Convertir en nombre
+        token = localStorage.getItem('userToken'); // Récupérer le token du localStorage
+
+        if (!currentConversationId || !currentUserId || !token) {
+            alert('Paramètres de conversation ou utilisateur manquants. Redirection vers la page d\'accueil.');
+            window.location.href = '/';
+        }
+
+        conversationTitle.textContent = `ID: ${currentConversationId}`; // Afficher l'ID pour l'instant
+
+        // Fonction pour récupérer les variables de configuration du serveur Node.js
+        async function fetchConfig() {
+            try {
+                const response = await fetch('/config');
+                const config = await response.json();
+                API_BASE_URL = config.API_BASE_URL;
+                WEBSOCKET_URL = config.WEBSOCKET_URL;
+                console.log('Configuration chargée:', config);
+            } catch (error) {
+                console.error('Erreur lors du chargement de la configuration:', error);
+                alert('Erreur: Impossible de charger la configuration du serveur.');
+            }
+        }
+
+        // Fonction pour récupérer l'utilisateur connecté (pour son nom)
+        async function fetchCurrentUser() {
+            try {
+                const response = await fetch(`${API_BASE_URL}/login`, { // Assumes /login endpoint returns current user
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token}`
+                    },
+                });
+                if (!response.ok) throw new Error('Failed to fetch current user');
+                const data = await response.json();
+                currentUserName = data.user.name;
+                userMap.set(data.user.id, data.user.name); // Ajoute aussi l'utilisateur à la map
+                console.log('Utilisateur actuel:', data.user);
+            } catch (error) {
+                console.error('Erreur de récupération de l\'utilisateur actuel:', error);
+                currentUserName = 'Moi'; // Fallback
+            }
+        }
+
+
+        // Fonction pour ajouter un message à l'interface
+        function addMessageToChat(message) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message-item ${message.user_id == currentUserId ? 'sent' : 'received'}`;
+
+            // Assurez-vous d'avoir le nom de l'expéditeur. Si pas dans userMap, utilisez l'ID
+            const senderName = userMap.get(message.user_id) || `Utilisateur ${message.user_id}`;
+            const time = new Date(message.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+            messageDiv.innerHTML = `
+                <div class="message-content">
+                    <div class="message-sender">${message.user_id == currentUserId ? currentUserName : senderName}</div>
+                    ${message.content}
+                    <div style="font-size: 0.7em; color: #888; text-align: right; margin-top: 5px;">${time}</div>
+                </div>
+            `;
+            messagesDiv.appendChild(messageDiv);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight; // Faire défiler vers le bas
+        }
+
+        // Fonction pour connecter au WebSocket
+        function connectWebSocket() {
+            if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+                console.log('WebSocket déjà connecté ou en cours de connexion.');
+                return;
+            }
+
+            statusIndicator.style.display = 'block';
+            statusIndicator.textContent = 'Connexion au chat...';
+            statusIndicator.style.backgroundColor = '#ffc107'; // Jaune
+
+            console.log(`Tentative de connexion au WebSocket: ${WEBSOCKET_URL}`);
+            ws = new WebSocket(WEBSOCKET_URL);
+
+            ws.onopen = async () => {
+                console.log('Connecté au WebSocket.');
+                statusIndicator.textContent = 'Connecté';
+                statusIndicator.style.backgroundColor = '#28a745'; // Vert
+
+                // Rejoindre la conversation après la connexion
+                ws.send(JSON.stringify({
+                    event: 'joinConversation',
+                    data: parseInt(currentConversationId) // Assure-toi que c'est un nombre
+                }));
+
+                // Si tu veux récupérer les anciens messages via l'API REST de Laravel après connexion, fais-le ici
+                await fetchOldMessages();
+            };
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                console.log('Message WS reçu:', data);
+
+                if (data.event === 'newMessage') {
+                    // Si le message provient d'un nouvel utilisateur, essaie de récupérer son nom
+                    if (!userMap.has(data.data.user_id)) {
+                        // Idéalement, fetcherais l'info de l'utilisateur ici via API
+                        // Pour l'exemple, ajoutons un placeholder ou un mécanisme plus robuste
+                        // Ou le serveur Node.js pourrait enrichir le message avec user.name
+                        console.log(`Nouvel utilisateur ${data.data.user_id} detected. Consider fetching their name.`);
+                        userMap.set(data.data.user_id, `Utilisateur ${data.data.user_id}`); // Placeholder
+                    }
+                    addMessageToChat(data.data); // data.data est l'objet message complet
+                } else if (data.event === 'joinedConversation') {
+                    console.log(`Confirmation: A rejoint la conversation ${data.data}`);
+                } else if (data.event === 'sendMessageError') {
+                    alert('Erreur lors de l\'envoi du message: ' + data.message);
+                }
+            };
+
+            ws.onclose = () => {
+                console.log('Déconnecté du WebSocket. Tentative de reconnexion...');
+                statusIndicator.textContent = 'Déconnecté. Reconnexion...';
+                statusIndicator.style.backgroundColor = '#dc3545'; // Rouge
+                // Auto-reconnexion après un délai
+                setTimeout(connectWebSocket, 5000); // Tente de reconnecter toutes les 5 secondes
+            };
+
+            ws.onerror = (error) => {
+                console.error('Erreur WebSocket:', error);
+                statusIndicator.textContent = 'Erreur de connexion';
+                statusIndicator.style.backgroundColor = '#dc3545'; // Rouge
+                ws.close(); // Ferme la connexion en erreur pour déclencher onclose
+            };
+        }
+
+        // Fonction pour envoyer un message
+        sendMessageButton.addEventListener('click', () => {
+            const content = messageInput.value.trim();
+            if (content && ws && ws.readyState === WebSocket.OPEN) {
+                const messagePayload = {
+                    event: 'sendMessage',
+                    data: {
+                        conversationId: parseInt(currentConversationId),
+                        senderId: currentUserId,
+                        content: content,
+                        type: 'text', // Ou le type que tu veux
+                        token: token // Passe le token pour l'authentification côté serveur Node.js si besoin
+                    }
+                };
+                ws.send(JSON.stringify(messagePayload));
+                messageInput.value = '';
+            } else {
+                alert('Impossible d\'envoyer le message. Non connecté ou message vide.');
+            }
+        });
+
+        // Fonction pour récupérer les messages historiques
+        async function fetchOldMessages() {
+            try {
+                const response = await fetch(`${API_BASE_URL}/conversations/${currentConversationId}/messages`, {
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                });
+
+                if (!response.ok) {
+                    throw new Error('Échec du chargement des messages historiques');
+                }
+                const data = await response.json();
+                const messages = data.data; // Assumes your API returns { data: [...] } for messages
+
+                // Récupère aussi les noms des utilisateurs de ces messages
+                const userIds = [...new Set(messages.map(m => m.user_id))];
+                await Promise.all(userIds.map(async id => {
+                    if (!userMap.has(id)) {
+                        try {
+                            // Tu devras avoir un endpoint `/users/{id}` ou `/users?ids=x,y,z`
+                            // Pour l'exemple, je simule juste un nom
+                            userMap.set(id, `Utilisateur ${id}`);
+                            // Ou mieux: fetch(`${API_BASE_URL}/users/${id}`, {headers: {'Authorization': `Bearer ${token}`}}).then(res => res.json()).then(user => userMap.set(user.id, user.name))
+                        } catch (e) {
+                            console.error(`Erreur pour récupérer l'utilisateur ${id}:`, e);
+                            userMap.set(id, `Inconnu ${id}`);
+                        }
+                    }
+                }));
+
+                messages.forEach(addMessageToChat);
+                // Mettre à jour last_read_message_id après avoir chargé les messages
+                if (messages.length > 0) {
+                    const lastMessageId = messages[messages.length - 1].id;
+                    await markConversationAsRead(currentConversationId, lastMessageId);
+                }
+
+            } catch (error) {
+                console.error('Erreur de récupération des messages historiques:', error);
+                alert('Erreur lors du chargement des messages historiques.');
+            }
+        }
+
+        // Fonction pour marquer la conversation comme lue
+        async function markConversationAsRead(conversationId, lastReadMessageId) {
+            try {
+                const response = await fetch(`${API_BASE_URL}/conversations/${conversationId}/read`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token}`
+                    },
+                    body: JSON.stringify({ last_read_message_id: lastReadMessageId })
+                });
+
+                if (!response.ok) {
+                    throw new Error('Échec de la mise à jour du statut lu');
+                }
+                console.log('Conversation marquée comme lue jusqu\'au message:', lastReadMessageId);
+            } catch (error) {
+                console.error('Erreur lors de la mise à jour du statut lu:', error);
+            }
+        }
+
+
+        // Exécuter au chargement de la page
+        document.addEventListener('DOMContentLoaded', async () => {
+            await fetchConfig(); // D'abord la config
+            await fetchCurrentUser(); // Puis l'utilisateur actuel
+            connectWebSocket(); // Ensuite, le WebSocket
+        });
+    </script>
+</body>
+</html>

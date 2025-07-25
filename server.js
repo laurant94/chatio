@@ -1,55 +1,34 @@
-const express = require('express');
+// server.js
+require('dotenv').config(); // Charge les variables d'environnement du fichier .env
 const http = require('http');
-const path = require('path');
 const WebSocket = require('ws');
-
-const app = express();
-const server = http.createServer(app);
-const wss = new WebSocket.Server({ server }); // Remplace socket.io
+const setupWebSocketHandler = require('./websocket/handler.js'); // Importe le gestionnaire WebSocket
 
 const PORT = process.env.PORT || 3000;
+const API_BASE_URL = process.env.API_BASE_URL; // Récupère l'URL de l'API depuis .env
 
-// Servez un fichier HTML pour tester dans un navigateur
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
-
-// Pour stocker tous les clients connectés
-const clients = new Set();
-
-wss.on('connection', (ws) => {
-  console.log('✅ Un client WebSocket est connecté');
-  clients.add(ws);
-
-  // Écoute les messages entrants
-  ws.on('message', (data) => {
-    try {
-      const parsed = JSON.parse(data);
-
-      if (parsed.event === 'chat message') {
-        console.log(`📨 Message reçu : ${parsed.data}`);
-
-        // Réémettre à tous les clients
-        for (const client of clients) {
-          if (client.readyState === WebSocket.OPEN) {
-            client.send(JSON.stringify({
-              event: 'chat message',
-              data: parsed.data
-            }));
-          }
-        }
-      }
-    } catch (e) {
-      console.error('Erreur de parsing JSON :', e);
+// Créer un serveur HTTP (nécessaire pour la mise à niveau du protocole vers WebSocket)
+const server = http.createServer((req, res) => {
+    // Si tu as des routes HTTP (par exemple, pour servir des pages web ou une API REST), tu les gérerais ici.
+    // Pour l'instant, juste un message de base.
+    if (req.url === '/') {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('Serveur WebSocket en marche !');
+    } else {
+        res.writeHead(404);
+        res.end('Not Found');
     }
-  });
-
-  ws.on('close', () => {
-    console.log('❌ Un client s’est déconnecté');
-    clients.delete(ws);
-  });
 });
 
+// Créer un serveur WebSocket en utilisant le serveur HTTP existant
+const wss = new WebSocket.Server({ server });
+
+// Appelle la fonction du gestionnaire WebSocket pour configurer les événements
+// On passe l'instance wss et l'URL de l'API à ce handler.
+setupWebSocketHandler(wss, API_BASE_URL);
+
+// Démarrer le serveur HTTP qui écoute aussi les connexions WebSocket
 server.listen(PORT, () => {
-  console.log(`🚀 Serveur WebSocket en écoute sur le port ${PORT}`);
+    console.log(`Serveur WebSocket écoutant sur le port ${PORT}`);
+    console.log(`API_BASE_URL pour les requêtes Laravel: ${API_BASE_URL}`);
 });

@@ -3,66 +3,318 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Test Chat WebSocket</title>
+    <title>Discussions - Authentification</title>
     <style>
-        body { font-family: Arial, sans-serif; padding: 1rem; }
-        ul { list-style: none; padding: 0; }
-        li { padding: 0.5rem; border-bottom: 1px solid #ddd; }
+        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f4; color: #333; }
+        .container { max-width: 600px; margin: 0 auto; background-color: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h1 { color: #007bff; text-align: center; }
+        #loginModal {
+            display: none; /* Caché par défaut */
+            position: fixed; /* Reste en place */
+            z-index: 1; /* S'affiche au-dessus de tout */
+            left: 0;
+            top: 0;
+            width: 100%; /* Pleine largeur */
+            height: 100%; /* Pleine hauteur */
+            overflow: auto; /* Active le défilement si nécessaire */
+            background-color: rgba(0,0,0,0.4); /* Fond semi-transparent */
+            justify-content: center;
+            align-items: center;
+        }
+        .modal-content {
+            background-color: #fefefe;
+            margin: auto;
+            padding: 20px;
+            border: 1px solid #888;
+            width: 80%;
+            max-width: 400px;
+            border-radius: 8px;
+            text-align: center;
+        }
+        .modal-content input[type="text"],
+        .modal-content input[type="password"] { /* Ajout du style pour le champ mot de passe */
+            width: calc(100% - 20px);
+            padding: 10px;
+            margin-bottom: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        .modal-content button {
+            background-color: #007bff;
+            color: white;
+            padding: 10px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .modal-content button:hover {
+            background-color: #0056b3;
+        }
+        #conversationsList {
+            margin-top: 20px;
+            border-top: 1px solid #eee;
+            padding-top: 10px;
+        }
+        .conversation-item {
+            padding: 10px 0;
+            border-bottom: 1px solid #eee;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .conversation-item:last-child {
+            border-bottom: none;
+        }
+        .conversation-item:hover {
+            background-color: #f0f0f0;
+        }
+        .conversation-item h3 {
+            margin: 0;
+            font-size: 1.1em;
+            color: #007bff;
+        }
+        .conversation-item p {
+            margin: 5px 0 0;
+            font-size: 0.9em;
+            color: #666;
+        }
+        #userInfo {
+            text-align: right;
+            font-size: 0.9em;
+            color: #555;
+            margin-bottom: 15px;
+        }
+        #loginError {
+            color: red;
+            margin-top: 10px;
+        }
     </style>
 </head>
 <body>
-    <h1>Chat de test (WebSocket)</h1>
-    <ul id="messages"></ul>
-    <form id="form" action="">
-        <input id="input" autocomplete="off" placeholder="Écris ton message..." />
-        <button>Envoyer</button>
-    </form>
+    <div class="container">
+        <div id="userInfo">Chargement de l'utilisateur...</div>
+        <h1>Vos Discussions</h1>
+        <div id="conversationsList">
+            <p>Chargement des conversations...</p>
+        </div>
+    </div>
+
+    <div id="loginModal">
+        <div class="modal-content">
+            <h2>Authentification Requise</h2>
+            <p>Veuillez entrer votre email et mot de passe.</p>
+            <input type="text" id="emailInput" placeholder="Votre email">
+            <input type="password" id="passwordInput" placeholder="Votre mot de passe">
+            <p id="loginError" style="display: none;"></p>
+            <button id="submitLogin">Se connecter</button>
+        </div>
+    </div>
 
     <script>
-        // Remplace ws://localhost:3000 par l’adresse de ton serveur si besoin
-        const socket = new WebSocket("ws://localhost:3000");
+        const API_LOGIN_PATH = '/login'; // Chemin de l'API Laravel pour la connexion
+        const API_CONVERSATIONS_PATH = '/conversations';
+        let API_BASE_URL; // Sera défini par /config
+        let WEBSOCKET_URL; // Sera défini par /config
 
-        const form = document.getElementById('form');
-        const input = document.getElementById('input');
-        const messages = document.getElementById('messages');
+        const loginModal = document.getElementById('loginModal');
+        const emailInput = document.getElementById('emailInput'); // Nouveau champ email
+        const passwordInput = document.getElementById('passwordInput'); // Nouveau champ mot de passe
+        const submitLoginButton = document.getElementById('submitLogin'); // Bouton de soumission
+        const loginError = document.getElementById('loginError');
+        const userInfoDiv = document.getElementById('userInfo');
+        const conversationsListDiv = document.getElementById('conversationsList');
 
-        socket.addEventListener('open', () => {
-            console.log('✅ Connecté au serveur WebSocket');
-        });
+        let user = null; // Stockera les informations de l'utilisateur
+        let token = localStorage.getItem('userToken'); // Tente de récupérer le token du localStorage
+        // Nous allons maintenant stocker l'objet utilisateur complet dans localStorage aussi
+        try {
+            const storedUser = localStorage.getItem('currentUser');
+            if (storedUser) {
+                user = JSON.parse(storedUser);
+            }
+        } catch (e) {
+            console.error("Erreur lors de la lecture de l'utilisateur depuis localStorage:", e);
+            localStorage.removeItem('currentUser');
+        }
 
-        socket.addEventListener('message', (event) => {
+
+        // Fonction pour récupérer les variables de configuration du serveur Node.js
+        async function fetchConfig() {
             try {
-                const msg = JSON.parse(event.data);
-                if (msg.event === 'chat message') {
-                    const item = document.createElement('li');
-                    item.textContent = msg.data;
-                    messages.appendChild(item);
-                    window.scrollTo(0, document.body.scrollHeight);
+                const response = await fetch('/config');
+                const config = await response.json();
+                API_BASE_URL = config.API_BASE_URL;
+                WEBSOCKET_URL = config.WEBSOCKET_URL;
+                console.log('Configuration chargée:', config);
+            } catch (error) {
+                console.error('Erreur lors du chargement de la configuration:', error);
+                alert('Erreur: Impossible de charger la configuration du serveur.');
+            }
+        }
+
+        // Fonction pour afficher le modal de connexion
+        function showLoginModal(message = '') {
+            loginError.textContent = message;
+            loginError.style.display = message ? 'block' : 'none';
+            loginModal.style.display = 'flex'; // Utilise flexbox pour centrer
+        }
+
+        // Fonction pour masquer le modal
+        function hideLoginModal() {
+            loginModal.style.display = 'none';
+        }
+
+        // Fonction pour tenter l'authentification avec email et mot de passe
+        async function authenticateUser(email, password) {
+            try {
+                const response = await fetch(`${API_BASE_URL}${API_LOGIN_PATH}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'User-Agent': 'Web-Chat'
+                    },
+                    body: JSON.stringify({
+                        email: email,
+                        password: password
+                    })
+                });
+
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.message || 'Échec de l\'authentification. Veuillez vérifier vos identifiants.');
                 }
-            } catch (e) {
-                console.error('Erreur lors de la lecture du message :', e);
+
+                const data = await response.json();
+                if (data.status === true && data.user && data.token) {
+                    return { user: data.user, token: data.token };
+                } else {
+                    throw new Error('Réponse d\'authentification inattendue.');
+                }
+            } catch (error) {
+                console.error('Erreur d\'authentification:', error);
+                throw error;
             }
-        });
+        }
 
-        socket.addEventListener('close', () => {
-            console.log('❌ Déconnecté du serveur WebSocket');
-        });
+        // Fonction pour charger la liste des conversations
+        async function loadConversations() {
+            if (!user || !token) {
+                conversationsListDiv.innerHTML = '<p>Veuillez vous connecter pour voir les conversations.</p>';
+                return;
+            }
 
-        socket.addEventListener('error', (e) => {
-            console.error('Erreur WebSocket :', e);
-        });
+            userInfoDiv.textContent = `Connecté en tant que: ${user.name} (ID: ${user.id})`;
+            conversationsListDiv.innerHTML = '<p>Chargement des conversations...</p>';
 
-        form.addEventListener('submit', (e) => {
-            e.preventDefault();
-            if (input.value && socket.readyState === WebSocket.OPEN) {
-                const message = {
-                    event: 'chat message',
-                    data: input.value
+            try {
+                const response = await fetch(`${API_BASE_URL}${API_CONVERSATIONS_PATH}`, {
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                });
+
+                if (!response.ok) {
+                    if (response.status === 401 || response.status === 403) {
+                        throw new Error('Non autorisé. Votre session a peut-être expiré.');
+                    }
+                    throw new Error(`Échec du chargement des conversations: ${response.statusText}`);
+                }
+
+                const conversations = await response.json();
+                displayConversations(conversations.data); // Assumes your API returns { data: [...] }
+            } catch (error) {
+                console.error('Erreur lors du chargement des conversations:', error);
+                conversationsListDiv.innerHTML = `<p style="color:red;">Erreur: ${error.message}. <button onclick="handleAuthAttempt()">Réessayer</button></p>`;
+                if (error.message.includes('Non autorisé') || error.message.includes('expiré')) {
+                    localStorage.removeItem('userToken'); // Nettoie le token invalide
+                    localStorage.removeItem('currentUser'); // Nettoie l'utilisateur invalide
+                    user = null; // Réinitialise l'utilisateur local
+                    token = null; // Réinitialise le token local
+                    showLoginModal('Votre session a expiré ou est invalide. Veuillez vous reconnecter.');
+                }
+            }
+        }
+
+        // Fonction pour afficher les conversations
+        function displayConversations(conversations) {
+            if (conversations.length === 0) {
+                conversationsListDiv.innerHTML = '<p>Aucune conversation trouvée.</p>';
+                return;
+            }
+
+            conversationsListDiv.innerHTML = '';
+            conversations.forEach(conv => {
+                const convDiv = document.createElement('div');
+                convDiv.className = 'conversation-item';
+                // Assurez-vous que `conv.name` est disponible ou un fallback
+                const conversationName = conv.name || conv.display_name || 'Conversation sans nom';
+                const lastMessageContent = conv.last_message ? conv.last_message.content : 'Pas encore de messages';
+
+                convDiv.innerHTML = `
+                    <div>
+                        <h3>${conversationName}</h3>
+                        <p>${lastMessageContent}</p>
+                    </div>
+                    <button>Ouvrir</button>
+                `;
+                convDiv.onclick = () => {
+                    // Sauvegarde l'ID de la conversation pour la page de chat
+                    localStorage.setItem('currentConversationId', conv.id);
+                    // Redirige vers la page de chat avec les infos nécessaires
+                    window.location.href = `/chat?conversationId=${conv.id}&userId=${user.id}`;
                 };
-                socket.send(JSON.stringify(message));
-                input.value = '';
+                conversationsListDiv.appendChild(convDiv);
+            });
+        }
+
+        // Gère la soumission des identifiants dans le modal
+        submitLoginButton.addEventListener('click', async () => {
+            const email = emailInput.value.trim();
+            const password = passwordInput.value.trim();
+
+            if (email && password) {
+                try {
+                    const authData = await authenticateUser(email, password);
+                    localStorage.setItem('userToken', authData.token); // Sauvegarde le token
+                    localStorage.setItem('currentUser', JSON.stringify(authData.user)); // Sauvegarde l'utilisateur
+                    token = authData.token;
+                    user = authData.user;
+                    hideLoginModal();
+                    loadConversations(); // Charge les conversations après connexion
+                } catch (error) {
+                    showLoginModal(error.message || 'Erreur de connexion. Veuillez réessayer.');
+                    console.error('Erreur de soumission des identifiants:', error);
+                }
+            } else {
+                showLoginModal('Veuillez entrer votre email et votre mot de passe.');
             }
         });
+
+        // Fonction principale pour démarrer le processus d'authentification et de chargement
+        async function handleAuthAttempt() {
+            await fetchConfig(); // Charge d'abord la configuration
+
+            if (token && user) { // Vérifie si le token et l'utilisateur sont déjà en localStorage
+                try {
+                    // Tente de valider le token existant en chargeant les conversations
+                    // Si cela échoue (ex: token expiré), le catch demandera une nouvelle connexion
+                    await loadConversations();
+                } catch (error) {
+                    console.warn('Token ou utilisateur existant invalide ou expiré.', error.message);
+                    localStorage.removeItem('userToken');
+                    localStorage.removeItem('currentUser');
+                    token = null;
+                    user = null;
+                    showLoginModal('Votre session a expiré ou est invalide. Veuillez vous reconnecter.');
+                }
+            } else {
+                showLoginModal(); // Affiche le modal si aucun token ou utilisateur n'est trouvé
+            }
+        }
+
+        // Lance le processus au chargement de la page
+        document.addEventListener('DOMContentLoaded', handleAuthAttempt);
     </script>
 </body>
 </html>

@@ -1,0 +1,54 @@
+// websocket/handler.js
+const messageHandlers = require('./message.js-V2');
+
+/**
+ * Configure et gère les événements du serveur WebSocket.
+ * @param {WebSocket.Server} wss L'instance du serveur WebSocket.
+ * @param {string} apiBaseUrl L'URL de base de l'API Laravel.
+ */
+function setupWebSocketHandler(wss, apiBaseUrl) {
+    wss.on('connection', (ws, req) => {
+        const clientIp = req.socket.remoteAddress || 'unknown';
+        console.log(`Un client WebSocket s'est connecté depuis ${clientIp}.`);
+
+        ws.on('message', async (message) => {
+            const messageString = message.toString();
+            console.log(`Message reçu du client (${clientIp}): ${messageString}`);
+
+            try {
+                const parsedMessage = JSON.parse(messageString);
+
+                switch (parsedMessage.event) {
+                    case 'joinConversation':
+                        messageHandlers.handleJoinConversation(ws, parsedMessage.data, clientIp);
+                        break;
+                    case 'sendMessage':
+                        await messageHandlers.handleSendMessage(ws, parsedMessage.data, apiBaseUrl);
+                        break;
+                    case 'joinLobby':
+                        messageHandlers.handleJoinLobby(ws, clientIp);
+                        break;
+                    default:
+                        console.log(`Type d'événement non reconnu de ${clientIp}:`, parsedMessage.event);
+                        ws.send(JSON.stringify({ event: 'error', message: 'Type d\'événement non reconnu.' }));
+                        break;
+                }
+
+            } catch (e) {
+                console.error(`Erreur lors du parsing du message JSON de ${clientIp}:`, e);
+                ws.send(JSON.stringify({ event: 'error', message: 'Format de message invalide.' }));
+            }
+        });
+
+        ws.on('close', () => {
+            console.log(`Un client WebSocket s'est déconnecté depuis ${clientIp}.`);
+            messageHandlers.removeClientFromAllConversations(ws, clientIp);
+        });
+
+        ws.on('error', (error) => {
+            console.error(`Erreur WebSocket pour le client ${clientIp}: ${error.message}`);
+        });
+    });
+}
+
+module.exports = setupWebSocketHandler;
