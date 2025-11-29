@@ -49,9 +49,9 @@ function handleJoinConversation(ws, conversationId, clientIp, userId) {
  * @param {string} apiBaseUrl L'URL de base de l'API Laravel.
  */
 async function handleSendMessage(ws, messageData, apiBaseUrl) {
-    const { token, conversationId, senderId, content, type } = messageData;
+    const { token, conversationId, senderId, content, type, media_url, thumbnail_url, metadata } = messageData;
 
-    if (!conversationId || !senderId || !content || !token) {
+    if (!conversationId || !senderId || !token) {
         console.warn('Données de message manquantes ou incomplètes:', messageData);
         ws.send(JSON.stringify({ event: 'sendMessageError', message: 'Données de message manquantes (conversationId, senderId, content, ou token).' }));
         return;
@@ -74,6 +74,9 @@ async function handleSendMessage(ws, messageData, apiBaseUrl) {
                 user_id: senderId,
                 content: content,
                 type: type || 'text',
+                media_url: media_url,
+                thumbnail_url: thumbnail_url,
+                metadata: metadata
             }),
         });
 
